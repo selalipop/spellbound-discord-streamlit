@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "spellbound-feedback-tool"
+version = "0.1.0"
+description = ""
+authors = ["Selali Adobor <selali.adobor@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+streamlit = "^1.41.1"
+psycopg2-binary = "^2.9.10"
+altair = "^5.5.0"
+sqlalchemy = "^2.0.36"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
