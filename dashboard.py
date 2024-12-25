@@ -81,24 +81,213 @@ def apply_filters(
     relevance_max: float
 ) -> pd.DataFrame:
     """Apply a series of filters on the DataFrame in-memory."""
+    # Author
     if author_filter.strip():
         df = df[df["author_username"].str.contains(author_filter, case=False, na=False)]
+    # Content
     if content_filter.strip():
         df = df[df["content"].str.contains(content_filter, case=False, na=False)]
+    # Channel
     if channel_filter.strip():
         df = df[df["channel_name"].str.contains(channel_filter, case=False, na=False)]
+    # Scores
     df = df[df["sentiment_score"].between(sentiment_min, sentiment_max)]
     df = df[df["relevance_score"].between(relevance_min, relevance_max)]
     return df
+
+def show_message_details(row: pd.Series):
+    """Renders a detailed drilldown of a single message row in Streamlit."""
+    # CONTENT
+    st.markdown("### Content")
+    raw_content = row["content"]
+    lines = raw_content.splitlines()
+    if not lines:
+        lines = [raw_content]
+    quoted_block = "\n".join(f"> {l}" for l in lines if l.strip()) or f"> {raw_content}"
+    st.markdown(quoted_block)
+
+    # SUMMARY
+    st.markdown("#### Summary")
+    st.markdown(row["summary"] if row["summary"] else "_No summary_")
+
+    # Single line metadata
+    now = datetime.now(timezone.utc)
+    dt = row["timestamp"]
+    delta = now - dt
+    rel_time = humanize_timedelta(delta)
+
+    meta_line = (
+        f"Author: {row['author_username']} &nbsp;|&nbsp;"
+        f"Channel: {row['channel_name']} &nbsp;|&nbsp;"
+        f"Time: {rel_time} &nbsp;&nbsp;"
+        f"Message ID: `{row['message_id']}`"
+    )
+    st.markdown(f"<small>{meta_line}</small>", unsafe_allow_html=True)
+
+    # SENTIMENT
+    st.markdown("### Sentiment")
+    c1, c2 = st.columns([0.5, 1.5], gap="small")
+    with c1:
+        st.metric("Score", f"{row['sentiment_score']:.2f}")
+    with c2:
+        st.markdown(f"**Rationale**: {row['sentiment_thought_rationale']}")
+
+    # RELEVANCE
+    st.markdown("### Relevance")
+    c3, c4 = st.columns([0.5, 1.5], gap="small")
+    with c3:
+        st.metric("Score", f"{row['relevance_score']:.2f}")
+    with c4:
+        st.markdown(f"**Rationale**: {row['relevance_thought_rationale']}")
+
+def filter_and_sort_by_sent_rel_date(
+    df: pd.DataFrame,
+    sentiment_min: float,
+    sentiment_max: float,
+    relevance_min: float,
+    relevance_max: float,
+    sort_option: str
+) -> pd.DataFrame:
+    """Filter by sentiment/relevance and then sort by date, sentiment, or relevance."""
+    # Filter
+    filtered = df[
+        (df["sentiment_score"].between(sentiment_min, sentiment_max)) &
+        (df["relevance_score"].between(relevance_min, relevance_max))
+    ]
+
+    # Sort
+    if sort_option == "Date (Newest First)":
+        filtered = filtered.sort_values(by="timestamp", ascending=False)
+    elif sort_option == "Date (Oldest First)":
+        filtered = filtered.sort_values(by="timestamp", ascending=True)
+    elif sort_option == "Sentiment (High→Low)":
+        filtered = filtered.sort_values(by="sentiment_score", ascending=False)
+    elif sort_option == "Sentiment (Low→High)":
+        filtered = filtered.sort_values(by="sentiment_score", ascending=True)
+    elif sort_option == "Relevance (High→Low)":
+        filtered = filtered.sort_values(by="relevance_score", ascending=False)
+    elif sort_option == "Relevance (Low→High)":
+        filtered = filtered.sort_values(by="relevance_score", ascending=True)
+
+    return filtered
+
+def show_category_tab_as_cards(df: pd.DataFrame, column_name: str, label_for_tab: str):
+    """
+    Displays a tab for the given column_name where that column is expected to be an array.
+    Instead of a table, each item in the array is listed as a separate "card" with:
+      - The item text
+      - Short excerpt of the original message
+      - A small data line with author, channel, time, sentiment, relevance
+    There is a filter by sentiment/relevance and a sort option.
+    """
+    st.subheader(f"{label_for_tab}")
+    
+    if df.empty:
+        st.info("No data available overall.")
+        return
+    
+    # Filter interface
+    # Defaults
+    sentiment_min_def = float(df["sentiment_score"].min())
+    sentiment_max_def = float(df["sentiment_score"].max())
+    relevance_min_def = float(df["relevance_score"].min())
+    relevance_max_def = float(df["relevance_score"].max())
+
+    colA, colB = st.columns(2)
+    with colA:
+        sentiment_min, sentiment_max = st.slider(
+            "Sentiment Score Range",
+            min_value=0.0,
+            max_value=5.0,
+            value=(sentiment_min_def, sentiment_max_def),
+            step=0.01,
+            key=f"{column_name}_sent_slider"
+        )
+    with colB:
+        relevance_min, relevance_max = st.slider(
+            "Relevance Score Range",
+            min_value=0.0,
+            max_value=5.0,
+            value=(relevance_min_def, relevance_max_def),
+            step=0.01,
+            key=f"{column_name}_rel_slider"
+        )
+    sort_option = st.selectbox(
+        "Sort by",
+        [
+            "Date (Newest First)",
+            "Date (Oldest First)",
+            "Sentiment (High→Low)",
+            "Sentiment (Low→High)",
+            "Relevance (High→Low)",
+            "Relevance (Low→High)",
+        ],
+        key=f"{column_name}_sort_select"
+    )
+    
+    # Filter and sort
+    filtered = filter_and_sort_by_sent_rel_date(
+        df, 
+        sentiment_min, sentiment_max, 
+        relevance_min, relevance_max, 
+        sort_option
+    )
+    
+    # If the user is showing e.g. Competitor Mentions, we want to list them
+    # For each row, if the array is not empty, show a card for each item
+    results_found = False
+    for _, row in filtered.iterrows():
+        items_list = row[column_name]
+        # Some could be None or empty
+        if not isinstance(items_list, list) or len(items_list) == 0:
+            continue
+        
+        # For each item in that list, produce a "card"
+        for item in items_list:
+            results_found = True
+            snippet = row["content"].replace("\n", " ")
+            max_len = 500
+            if len(snippet) > max_len:
+                snippet = snippet[:max_len] + "..."
+            
+            now = datetime.now(timezone.utc)
+            dt = row["timestamp"]
+            delta = now - dt
+            rel_time = humanize_timedelta(delta)
+
+            st.write("-----")
+            # Main item text
+            st.markdown(f"### {item}")
+            # Short excerpt
+            st.markdown(f"**Message excerpt:** {snippet}")
+            # Small data line
+            st.markdown(
+                f"**Author**: {row['author_username']} | "
+                f"**Channel**: {row['channel_name']} | "
+                f"**Time**: {rel_time} | "
+                f"**Sentiment**: {row['sentiment_score']:.2f} | "
+                f"**Relevance**: {row['relevance_score']:.2f}"
+            )
+    if not results_found:
+        st.info(f"No messages have {label_for_tab} items under these filters/sort settings.")
 
 # ------------------------------------------------------------------------------
 # MAIN APP
 # ------------------------------------------------------------------------------
 def main():
     st.set_page_config(page_title="Message Analysis Explorer", layout="wide")
-    tab_main, tab_other = st.tabs(["Main Analysis Explorer", "Another Tab"])
+    # We only have the main tab plus the 6 category tabs:
+    tabs = st.tabs([
+        "Main Analysis Explorer",
+        "Competitor Mentions",
+        "Product Praise",
+        "Product Complaints",
+        "Product Technical Problems",
+        "Feature Requests",
+        "Product Justification"
+    ])
     
-    with tab_main:
+    with tabs[0]:
         st.title("Message & Analysis Explorer")
         
         df = get_data()
@@ -137,7 +326,7 @@ def main():
                     step=0.01
                 )
 
-        # Filter
+        # Apply top-level filters
         filtered_df = apply_filters(
             df,
             author_filter,
@@ -156,33 +345,26 @@ def main():
             st.subheader("Filtered Messages")
             if filtered_df.empty:
                 st.info("No messages match your filter.")
-                # Clear selection
                 st.session_state["selected_msg_id"] = None
             else:
-                # Prepare data for st.data_editor
-                # STEP 1: Initialize st.session_state data if needed
-                if "table_source" not in st.session_state:
-                    st.session_state["table_source"] = pd.DataFrame()
+                # Initialize session state
                 if "selected_msg_id" not in st.session_state:
                     st.session_state["selected_msg_id"] = None
                 
-                # Build a fresh table each run
+                # Create a truncated column for display
                 table_df = filtered_df.copy()
                 table_df["Truncated"] = table_df["content"].apply(
                     lambda x: x.replace("\n"," ")[:80] + ("..." if len(x) > 80 else "")
                 )
                 table_df["Selected"] = False
 
-                # Restore existing selection if it is still in filtered_df
+                # Restore existing selection if present
                 if st.session_state["selected_msg_id"] in table_df["message_id"].values:
                     idx = table_df[table_df["message_id"] == st.session_state["selected_msg_id"]].index
                     table_df.loc[idx, "Selected"] = True
 
-                # We’ll hide everything except "Selected"/"Truncated"
-                # but keep message_id in the index so we can identify rows
                 table_df.set_index("message_id", inplace=True, drop=False)
 
-                # STEP 2: Show st.data_editor 
                 returned_df = st.data_editor(
                     table_df[["Selected", "Truncated"]],
                     column_config={
@@ -193,35 +375,26 @@ def main():
                         "Truncated": st.column_config.TextColumn(
                             "Message (Truncated)",
                             help="Shortened version of message content",
-                            disabled=True  # read-only
+                            disabled=True
                         )
                     },
                     num_rows="fixed",
                     hide_index=True,
                     use_container_width=True,
                     height=400,
-                    key="my_data_editor"
+                    key="main_data_editor"
                 )
 
-                # STEP 3: Single-row selection logic 
-                # Compare returned_df['Selected'] with the previous state 
-                # so that only one row can remain checked
+                # Single-row selection logic
                 if not returned_df.equals(table_df[["Selected","Truncated"]]):
-                    # The user changed something in the checkboxes
-                    # Determine which rows are now checked
                     selected_indexes = returned_df.index[returned_df["Selected"] == True].tolist()
                     if len(selected_indexes) > 1:
-                        # More than one row is selected, keep the last one
                         last_idx = selected_indexes[-1]
                         for i in selected_indexes:
                             if i != last_idx:
                                 returned_df.at[i, "Selected"] = False
-                        # Re-run so that the data_editor is updated
-                    # Now there's 0 or 1 row selected
                     final_selected = returned_df.index[returned_df["Selected"]].tolist()
                     st.session_state["selected_msg_id"] = final_selected[0] if final_selected else None
-
-                # If the user unchecks the row, then final_selected is empty, we set st.session_state to None
 
         with col_right:
             st.subheader("Message Analysis Drilldown")
@@ -229,75 +402,53 @@ def main():
             if selected_id is not None:
                 selection_row = filtered_df.loc[filtered_df["message_id"] == selected_id]
                 if not selection_row.empty:
-                    row = selection_row.iloc[0]
-                    
-                    # CONTENT
-                    st.markdown("### Content")
-                    raw_content = row["content"]
-                    lines = raw_content.splitlines()
-                    if not lines:
-                        lines = [raw_content]
-                    quoted_block = "\n".join(f"> {l}" for l in lines if l.strip()) or f"> {raw_content}"
-                    st.markdown(quoted_block)
-                    
-                    # SUMMARY
-                    st.markdown("#### Summary")
-                    st.markdown(row["summary"] if row["summary"] else "_No summary_")
-                    
-                    # Single line metadata
-                    now = datetime.now(timezone.utc)
-                    dt = row["timestamp"]
-                    delta = now - dt
-                    rel_time = humanize_timedelta(delta)
-
-                    meta_line = (
-                        f"Author: {row['author_username']} &nbsp;|&nbsp;"
-                        f" Channel: {row['channel_name']} &nbsp;|&nbsp;"
-                        f" Time: {rel_time} &nbsp;&nbsp;"
-                        f"Message ID: `{row['message_id']}`"
-                    )
-                    st.markdown(f"<small>{meta_line}</small>", unsafe_allow_html=True)
-
-                    # SENTIMENT
-                    st.markdown("### Sentiment")
-                    c1, c2 = st.columns([0.5, 1.5], gap="small")
-                    with c1:
-                        st.metric("Score", f"{row['sentiment_score']:.2f}")
-                    with c2:
-                        st.markdown(f"**Rationale**: {row['sentiment_thought_rationale']}")
-
-                    # RELEVANCE
-                    st.markdown("### Relevance")
-                    c3, c4 = st.columns([0.5, 1.5], gap="small")
-                    with c3:
-                        st.metric("Score", f"{row['relevance_score']:.2f}")
-                    with c4:
-                        st.markdown(f"**Rationale**: {row['relevance_thought_rationale']}")
-
-                    # ADDITIONAL DETAILS
-                    st.markdown("### Additional Details")
-                    def display_list_in_markdown(label, items):
-                        if items:
-                            # Might be list or single string
-                            actual_list = items if isinstance(items, list) else [items]
-                            if len(actual_list) > 0:
-                                st.markdown(f"**{label}:**")
-                                for val in actual_list:
-                                    st.markdown(f"- {val}")
-
-                    display_list_in_markdown("Competitor Mentions", row["competitor_mentions"])
-                    display_list_in_markdown("Product Praise", row["product_praise"])
-                    display_list_in_markdown("Product Complaints", row["product_complaints"])
-                    display_list_in_markdown("Product Technical Problems", row["product_technical_problem"])
-                    display_list_in_markdown("Feature Requests", row["feature_requests"])
-                    display_list_in_markdown("Product Justification", row["product_justification"])
+                    show_message_details(selection_row.iloc[0])
                 else:
                     st.info("The selected message is not in the filtered dataset.")
             else:
                 st.info("Select a row from the left table to view details here.")
 
-    with tab_other:
-        st.write("Another tab for future expansions.")
+    # ------------------
+    # Competitor Mentions
+    # ------------------
+    with tabs[1]:
+        df_all = get_data()
+        show_category_tab_as_cards(df_all, "competitor_mentions", "Competitor Mentions")
+
+    # ------------------
+    # Product Praise
+    # ------------------
+    with tabs[2]:
+        df_all = get_data()
+        show_category_tab_as_cards(df_all, "product_praise", "Product Praise")
+
+    # ------------------
+    # Product Complaints
+    # ------------------
+    with tabs[3]:
+        df_all = get_data()
+        show_category_tab_as_cards(df_all, "product_complaints", "Product Complaints")
+
+    # ------------------
+    # Product Technical Problems
+    # ------------------
+    with tabs[4]:
+        df_all = get_data()
+        show_category_tab_as_cards(df_all, "product_technical_problem", "Product Technical Problems")
+
+    # ------------------
+    # Feature Requests
+    # ------------------
+    with tabs[5]:
+        df_all = get_data()
+        show_category_tab_as_cards(df_all, "feature_requests", "Feature Requests")
+
+    # ------------------
+    # Product Justification
+    # ------------------
+    with tabs[6]:
+        df_all = get_data()
+        show_category_tab_as_cards(df_all, "product_justification", "Product Justification")
 
 
 if __name__ == "__main__":
